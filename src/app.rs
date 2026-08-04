@@ -1,12 +1,14 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
 
-const WORDS: &[&str] = &[
-    "amber", "anchor", "apple", "balance", "breeze", "bright", "canvas", "cedar", "clarity",
-    "cloud", "copper", "drift", "ember", "field", "focus", "forest", "gentle", "golden", "harbor",
-    "island", "juniper", "kindle", "lantern", "maple", "meadow", "moss", "north", "ocean", "paper",
-    "pebble", "quiet", "river", "saffron", "signal", "silver", "spring", "stone", "sunset",
-    "thread", "valley", "velvet", "willow", "winter", "wonder",
-];
+static WORDS: LazyLock<Vec<&str>> = LazyLock::new(|| {
+    include_str!("../words.txt")
+        .lines()
+        .filter(|word| !word.is_empty())
+        .collect()
+});
 pub const DURATIONS: [Option<u64>; 5] = [Some(15), Some(30), Some(60), Some(120), None];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +56,6 @@ pub struct App {
     pub duration_index: usize,
     pub typed: String,
     pub prompt: String,
-    random_state: u64,
     started_at: Option<Instant>,
     pub elapsed: Duration,
 }
@@ -70,7 +71,6 @@ impl App {
             duration_index: 2,
             typed: String::new(),
             prompt: String::new(),
-            random_state: 0x9e37_79b9_7f4a_7c15,
             started_at: None,
             elapsed: Duration::ZERO,
         }
@@ -144,28 +144,20 @@ impl App {
         self.typed.pop();
     }
 
-    fn next_random(&mut self) -> u64 {
-        self.random_state = self
-            .random_state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
-        self.random_state
-    }
-
     fn extend_prompt(&mut self) {
         while self.prompt.chars().count() < self.typed.chars().count() + 360 {
             if !self.prompt.is_empty() {
                 self.prompt.push(' ');
             }
-            let mut word = WORDS[(self.next_random() as usize) % WORDS.len()].to_owned();
-            if self.include_capitals && self.next_random().is_multiple_of(5) {
+            let mut word = WORDS[rand::random_range(0..WORDS.len())].to_owned();
+            if self.include_capitals && rand::random_ratio(1, 5) {
                 word.replace_range(..1, &word[..1].to_uppercase());
             }
-            if self.include_numbers && self.next_random().is_multiple_of(6) {
-                word.push_str(&format!("{}", self.next_random() % 100));
+            if self.include_numbers && rand::random_ratio(1, 6) {
+                word.push_str(&rand::random_range(0..100).to_string());
             }
-            if self.include_symbols && self.next_random().is_multiple_of(7) {
-                word.push(['!', '?', '#', '@'][(self.next_random() as usize) % 4]);
+            if self.include_symbols && rand::random_ratio(1, 7) {
+                word.push(['!', '?', '#', '@'][rand::random_range(0..4)]);
             }
             self.prompt.push_str(&word);
         }
@@ -219,7 +211,7 @@ mod tests {
         app.include_numbers = true;
         app.include_capitals = true;
         app.include_symbols = true;
-        app.extend_prompt();
+        app.start();
         assert!(
             app.prompt
                 .chars()
@@ -234,6 +226,18 @@ mod tests {
             app.prompt
                 .chars()
                 .any(|character| "!?#@".contains(character))
+        );
+    }
+
+    #[test]
+    fn generates_words_from_the_word_bank() {
+        let mut app = App::new();
+        app.start();
+
+        assert!(
+            app.prompt
+                .split_whitespace()
+                .all(|word| WORDS.contains(&word))
         );
     }
 }
