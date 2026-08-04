@@ -3,6 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::race::{RaceClient, RaceEvent};
+use crate::storage::{Session, SessionStore, current_timestamp};
+
 static WORDS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     include_str!("../words.txt")
         .lines()
@@ -14,8 +17,11 @@ pub const DURATIONS: [Option<u64>; 5] = [Some(15), Some(30), Some(60), Some(120)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Menu,
+    RaceSetup,
+    RaceLobby,
     Typing,
     Finished,
+    History,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,15 +31,19 @@ pub enum MenuItem {
     Symbols,
     Duration,
     Start,
+    Race,
+    History,
 }
 
 impl MenuItem {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
         Self::Numbers,
         Self::Capitals,
         Self::Symbols,
         Self::Duration,
         Self::Start,
+        Self::Race,
+        Self::History,
     ];
 
     pub fn next(self) -> Self {
@@ -47,6 +57,29 @@ impl MenuItem {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaceSetupItem {
+    Host,
+    Join,
+}
+
+impl RaceSetupItem {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Host => Self::Join,
+            Self::Join => Self::Host,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opponent {
+    pub characters: usize,
+    pub wpm: Option<u16>,
+    pub accuracy: u16,
+    pub finished: bool,
+}
+
 pub struct App {
     pub screen: Screen,
     pub menu_item: MenuItem,
@@ -57,12 +90,24 @@ pub struct App {
     pub typed: String,
     pub prompt: String,
     started_at: Option<Instant>,
+    session_started_at: Option<i64>,
     pub elapsed: Duration,
+    sessions: Vec<Session>,
+    store: SessionStore,
+    pub storage_error: Option<String>,
+    pub race_setup_item: RaceSetupItem,
+    pub race_code: String,
+    pub race_status: Option<String>,
+    pub opponent: Option<Opponent>,
+    race_client: Option<RaceClient>,
+    race_start_at: Option<std::time::SystemTime>,
 }
 
 impl App {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> rusqlite::Result<Self> {
+        let store = SessionStore::open_default()?;
+        let sessions = store.sessions()?;
+        Ok(Self {
             screen: Screen::Menu,
             menu_item: MenuItem::Numbers,
             include_numbers: false,
@@ -72,26 +117,158 @@ impl App {
             typed: String::new(),
             prompt: String::new(),
             started_at: None,
+            session_started_at: None,
             elapsed: Duration::ZERO,
-        }
+            sessions,
+            store,
+            storage_error: None,
+            race_setup_item: RaceSetupItem::Host,
+            race_code: String::new(),
+            race_status: None,
+            opponent: None,
+            race_client: None,
+            race_start_at: None,
+        })
     }
 
     pub fn start(&mut self) {
+        self.race_client = None;
+        self.race_start_at = None;
+        self.opponent = None;
         self.screen = Screen::Typing;
         self.typed.clear();
         self.prompt.clear();
         self.extend_prompt();
         self.elapsed = Duration::ZERO;
         self.started_at = Some(Instant::now());
+        self.session_started_at = Some(current_timestamp());
+    }
+
+    pub fn open_race_setup(&mut self) {
+        self.race_client = None;
+        self.race_start_at = None;
+        self.screen = Screen::RaceSetup;
+        self.race_setup_item = RaceSetupItem::Host;
+        self.race_code.clear();
+        self.race_status = None;
+        self.opponent = None;
+    }
+
+    pub fn host_race(&mut self, relay_address: &str) -> Result<(), String> {
+        self.prepare_race_prompt();
+        self.race_client = Some(
+            RaceClient::host(relay_address, self.duration(), self.prompt.clone())
+                .map_err(|error| format!("Could not reach relay: {error}"))?,
+        );
+        self.screen = Screen::RaceLobby;
+        self.race_status = Some("Creating invite code…".into());
+        Ok(())
+    }
+
+    pub fn join_race(&mut self, relay_address: &str) -> Result<(), String> {
+        if self.race_code.trim().len() != 6 {
+            return Err("Enter the six-character invite code.".into());
+        }
+        self.race_client = Some(
+            RaceClient::join(relay_address, &self.race_code)
+                .map_err(|error| format!("Could not reach relay: {error}"))?,
+        );
+        self.race_code = self.race_code.trim().to_ascii_uppercase();
+        self.screen = Screen::RaceLobby;
+        self.race_status = Some("Joining race…".into());
+        Ok(())
+    }
+
+    pub fn poll_race(&mut self) {
+        let mut events = Vec::new();
+        if let Some(client) = &self.race_client {
+            while let Some(event) = client.try_event() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            match event {
+                RaceEvent::Hosted { code } => {
+                    self.race_code = code;
+                    self.race_status = Some("Share this code. Waiting for your opponent…".into());
+                }
+                RaceEvent::Start {
+                    starts_at_millis,
+                    duration_seconds,
+                    prompt,
+                } => {
+                    if let Some(index) = DURATIONS
+                        .iter()
+                        .position(|duration| *duration == duration_seconds)
+                    {
+                        self.duration_index = index;
+                    }
+                    self.prompt = prompt;
+                    self.typed.clear();
+                    self.elapsed = Duration::ZERO;
+                    self.opponent = Some(Opponent {
+                        characters: 0,
+                        wpm: None,
+                        accuracy: 100,
+                        finished: false,
+                    });
+                    self.race_start_at =
+                        Some(std::time::UNIX_EPOCH + Duration::from_millis(starts_at_millis));
+                    self.race_status = Some("Opponent joined. Starting together…".into());
+                }
+                RaceEvent::PeerProgress {
+                    characters,
+                    accuracy,
+                } => {
+                    if let Some(opponent) = &mut self.opponent {
+                        opponent.characters = characters;
+                        opponent.accuracy = accuracy;
+                    }
+                }
+                RaceEvent::PeerFinished {
+                    characters,
+                    wpm,
+                    accuracy,
+                } => {
+                    self.opponent = Some(Opponent {
+                        characters,
+                        wpm: Some(wpm),
+                        accuracy,
+                        finished: true,
+                    });
+                }
+                RaceEvent::PeerDisconnected => {
+                    if self.screen == Screen::RaceLobby || self.screen == Screen::Typing {
+                        self.race_status = Some("Your opponent disconnected.".into());
+                    }
+                }
+                RaceEvent::Error(message) => {
+                    self.race_status = Some(format!("Race error: {}", message.replace('-', " ")));
+                    if self.screen == Screen::RaceLobby {
+                        self.screen = Screen::RaceSetup;
+                    }
+                }
+            }
+        }
     }
 
     pub fn return_to_menu(&mut self) {
         self.update_elapsed();
+        self.record_session();
+        self.report_race_finish();
         self.started_at = None;
+        self.session_started_at = None;
         self.screen = Screen::Menu;
     }
 
     pub fn update_clock(&mut self) {
+        if self.screen == Screen::RaceLobby
+            && self
+                .race_start_at
+                .is_some_and(|start| std::time::SystemTime::now() >= start)
+        {
+            self.start_race();
+        }
         if let Some(start) = self.started_at {
             self.elapsed = start.elapsed();
             if self
@@ -105,8 +282,11 @@ impl App {
 
     pub fn finish(&mut self) {
         self.update_elapsed();
+        self.record_session();
+        self.report_race_finish();
         self.screen = Screen::Finished;
         self.started_at = None;
+        self.session_started_at = None;
     }
 
     pub fn update_elapsed(&mut self) {
@@ -137,15 +317,28 @@ impl App {
 
     pub fn type_character(&mut self, character: char) {
         self.typed.push(character);
-        self.extend_prompt();
+        if self.race_client.is_none() {
+            self.extend_prompt();
+        }
+        self.report_race_progress();
     }
 
     pub fn delete_character(&mut self) {
         self.typed.pop();
+        self.report_race_progress();
     }
 
     fn extend_prompt(&mut self) {
-        while self.prompt.chars().count() < self.typed.chars().count() + 360 {
+        self.extend_prompt_to(self.typed.chars().count() + 360);
+    }
+
+    fn prepare_race_prompt(&mut self) {
+        self.prompt.clear();
+        self.extend_prompt_to(6_000);
+    }
+
+    fn extend_prompt_to(&mut self, target_length: usize) {
+        while self.prompt.chars().count() < target_length {
             if !self.prompt.is_empty() {
                 self.prompt.push(' ');
             }
@@ -160,6 +353,26 @@ impl App {
                 word.push(['!', '?', '#', '@'][rand::random_range(0..4)]);
             }
             self.prompt.push_str(&word);
+        }
+    }
+
+    fn start_race(&mut self) {
+        self.screen = Screen::Typing;
+        self.started_at = Some(Instant::now());
+        self.session_started_at = Some(current_timestamp());
+        self.race_start_at = None;
+        self.race_status = None;
+    }
+
+    fn report_race_progress(&self) {
+        if let Some(client) = &self.race_client {
+            client.progress(self.typed.chars().count(), self.accuracy());
+        }
+    }
+
+    fn report_race_finish(&self) {
+        if let Some(client) = &self.race_client {
+            client.finish(self.typed.chars().count(), self.wpm(), self.accuracy());
         }
     }
 
@@ -184,6 +397,24 @@ impl App {
             ((self.typed.chars().count() as f64 / 5.0) / minutes).round() as u16
         }
     }
+
+    pub fn sessions(&self) -> &[Session] {
+        &self.sessions
+    }
+
+    fn record_session(&mut self) {
+        let session = Session {
+            started_at: self.session_started_at.unwrap_or_else(current_timestamp),
+            duration_seconds: self.elapsed.as_secs(),
+            characters: self.typed.chars().count(),
+            wpm: self.wpm(),
+            accuracy: self.accuracy(),
+        };
+        match self.store.save(&session) {
+            Ok(()) => self.sessions.push(session),
+            Err(error) => self.storage_error = Some(error.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,7 +423,7 @@ mod tests {
 
     #[test]
     fn tracks_accuracy_from_typed_characters() {
-        let mut app = App::new();
+        let mut app = App::new().unwrap();
         app.typed = "The x".into();
         app.prompt = "The best".into();
         assert_eq!(app.accuracy(), 80);
@@ -200,14 +431,14 @@ mod tests {
 
     #[test]
     fn time_is_capped_at_zero() {
-        let mut app = App::new();
+        let mut app = App::new().unwrap();
         app.elapsed = Duration::from_secs(99);
         assert_eq!(app.seconds_left(), 0);
     }
 
     #[test]
     fn generates_configured_random_words() {
-        let mut app = App::new();
+        let mut app = App::new().unwrap();
         app.include_numbers = true;
         app.include_capitals = true;
         app.include_symbols = true;
@@ -231,7 +462,7 @@ mod tests {
 
     #[test]
     fn generates_words_from_the_word_bank() {
-        let mut app = App::new();
+        let mut app = App::new().unwrap();
         app.start();
 
         assert!(
@@ -239,5 +470,26 @@ mod tests {
                 .split_whitespace()
                 .all(|word| WORDS.contains(&word))
         );
+    }
+
+    #[test]
+    fn prepares_a_long_shared_prompt_for_a_race() {
+        let mut app = App::new().unwrap();
+        app.prepare_race_prompt();
+
+        assert!(app.prompt.chars().count() >= 6_000);
+    }
+
+    #[test]
+    fn hosting_a_race_enters_the_lobby() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || crate::race::run_relay(listener).unwrap());
+        let mut app = App::new().unwrap();
+
+        app.host_race(&address).unwrap();
+
+        assert_eq!(app.screen, Screen::RaceLobby);
+        assert!(app.prompt.chars().count() >= 6_000);
     }
 }
