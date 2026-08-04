@@ -1,7 +1,22 @@
 [package]
-name = "TypeSafe"
+name = "typesafe"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "A focused terminal typing-practice application"
+readme = "README.md"
+repository = "https://github.com/Pikaryu729/Typesafe"
+license = "MIT"
+keywords = ["typing", "terminal", "tui", "practice", "ratatui"]
+categories = ["command-line-utilities"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE-MIT",
+    "README.md",
+    "src/**",
+    "words.txt",
+]
 
 [dependencies]
 crossterm = "0.28"
