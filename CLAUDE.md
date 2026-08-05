@@ -9,7 +9,7 @@ cargo run                       # launch the TUI
 cargo run -- relay 0.0.0.0:9876 # run the race relay server instead of the TUI
 cargo test                      # all tests
 cargo test relay_pairs_two_clients_and_forwards_progress   # a single test by name
-cargo test --lib race::         # a module's tests
+cargo test race::               # a module's tests (binary-only crate — --lib has no target)
 cargo clippy --all-targets
 cargo fmt
 ```
@@ -34,7 +34,7 @@ Four modules under a single binary crate; `main.rs` owns the terminal lifecycle 
 
   The invite code is generated **client-side** (`invite_code`, ambiguity-free alphabet) and the relay rejects collisions with `ERROR code-unavailable`. Host disconnect removes the room; guest disconnect only clears the guest slot.
 
-- **`storage.rs`** — SQLite (`rusqlite` with `bundled`, so no system libsqlite needed) at `<data_local_dir>/typesafe/sessions.sqlite3`. One table, `typing_sessions`, created idempotently on open. Sessions are recorded both on natural finish and on Escape-out (`return_to_menu`), including races. Storage failures never abort the app — they land in `App::storage_error` for the UI to surface.
+- **`storage.rs`** — SQLite (`rusqlite` with `bundled`, so no system libsqlite needed) at `<data_local_dir>/typesafe/sessions.sqlite3`. One table, `typing_sessions`, created idempotently on open. Sessions are recorded both on natural finish and on Escape-out (`return_to_menu`), including races. Storage failures never abort the app — they land in `App::storage_error`, which is rendered only on the History screen (`ui.rs`, inside `history`, overdrawing the heatmap row), so a failed save is invisible from the results screen.
 
 - **`ui.rs`** — Pure rendering; takes `&App` and never mutates. `render` splits header / body / footer, then dispatches on `app.screen`. The history screen derives its weekly-average trend and year-long heat map from the raw session list at draw time (`average_wpm_trend`, `heatmap`, `week_start`) — there are no aggregate tables.
 
