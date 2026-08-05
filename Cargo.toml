@@ -2,7 +2,7 @@
 name = "typesafe"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A focused terminal typing-practice application"
 readme = "README.md"
 repository = "https://github.com/Pikaryu729/Typesafe"

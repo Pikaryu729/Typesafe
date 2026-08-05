@@ -57,7 +57,7 @@ your operating system's local application-data directory under
 
 ## Requirements
 
-TypeSafe requires Rust 1.85 or later and a terminal with Unicode support.
+TypeSafe requires Rust 1.88 or later and a terminal with Unicode support.
 
 ## License
 
