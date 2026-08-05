@@ -16,7 +16,7 @@ cargo fmt
 
 `TYPESAFE_RELAY_ADDR` selects the relay a client connects to (default `127.0.0.1:9876`).
 
-Edition 2024, MSRV 1.85 — let-chains (`if let Some(x) = a && cond`) are used throughout and require that toolchain.
+Edition 2024, MSRV 1.88 — let-chains (`if let Some(x) = a && cond`, at `main.rs:59` and `race.rs:197`) were stabilized in 1.88, and the dependency tree floors at 1.88 too (`darling`/`instability`, transitively via `ratatui`).
 
 ## Architecture
 
@@ -42,4 +42,4 @@ Four modules under a single binary crate; `main.rs` owns the terminal lifecycle 
 
 ## Tests
 
-Tests live in `#[cfg(test)] mod tests` at the bottom of each module. Note that `App::new()` in tests opens the **real** user database (`SessionStore::open_default`), so app tests touch `~/.local/share/typesafe/sessions.sqlite3`; only `SessionStore::in_memory()` (test-only) is isolated. Race tests start a real relay on `127.0.0.1:0` in a background thread and poll with a deadline helper (`wait_for_event`) rather than sleeping a fixed interval.
+Tests live in `#[cfg(test)] mod tests` at the bottom of `app.rs`, `race.rs`, and `storage.rs`; `ui.rs` and `main.rs` have none, so the rendering helpers (`average_wpm_trend`, `heatmap`, `week_start`, `colored_prompt`) are uncovered despite being pure functions. Note that `App::new()` in tests opens the **real** user database (`SessionStore::open_default`), so app tests touch `~/.local/share/typesafe/sessions.sqlite3`; only `SessionStore::in_memory()` (test-only) is isolated. Race tests start a real relay on `127.0.0.1:0` in a background thread and poll with a deadline helper (`wait_for_event`) rather than sleeping a fixed interval.
